@@ -8,6 +8,8 @@ import {
   chromeExecutablePath,
   edgeExecutablePath,
 } from '@browserless.io/browserless';
+import { launchPath } from 'camoufox-js/dist/pkgman.js';
+import { launchOptions } from 'camoufox-js/dist/utils.js';
 import playwright, { Page } from 'playwright-core';
 import { Duplex } from 'stream';
 import { EventEmitter } from 'events';
@@ -275,6 +277,7 @@ export class EdgePlaywright extends ChromiumPlaywright {
 
 export class FirefoxPlaywright extends BasePlaywright {
   protected playwrightBrowserType = PlaywrightBrowserTypes.firefox;
+  protected executablePath = () => launchPath();
 
   protected makeLaunchOptions(opts: BrowserServerOptions) {
     return {
@@ -285,6 +288,63 @@ export class FirefoxPlaywright extends BasePlaywright {
       ],
       executablePath: this.executablePath(),
     };
+  }
+
+  public async launch(
+    launcherOpts: BrowserLauncherOptions,
+  ): Promise<playwright.BrowserServer> {
+    const { options, pwVersion } = launcherOpts;
+    this.logger.info(`Launching FirefoxPlaywright (camoufox) Handler`);
+
+    const versionedPw = await this.config.loadPwVersion(pwVersion!);
+
+    const headless = launcherOpts.options.headless !== undefined ? launcherOpts.options.headless : true;
+    
+    // Get camoufox-specific launch options
+    const camoufoxOpts = await launchOptions({ headless });
+    
+    // Merge camoufox options with user options and base options
+    const baseOpts = this.makeLaunchOptions(options);
+    const mergedArgs = [
+      ...(camoufoxOpts.args || []),
+      ...(baseOpts.args || []),
+    ].filter(arg => arg !== '');
+
+    const browser = await versionedPw[this.playwrightBrowserType].launchServer({
+      ...camoufoxOpts,
+      ...baseOpts,
+      args: mergedArgs,
+      executablePath: this.executablePath(), // Use launchPath
+    });
+
+    const browserWSEndpoint = browser.wsEndpoint();
+
+    this.logger.info(
+      `${this.constructor.name} is running on ${browserWSEndpoint}`,
+    );
+    this.running = true;
+    this.browserWSEndpoint = browserWSEndpoint;
+    this.browser = browser;
+
+    // Mirror ChromiumCDP: propagate unexpected playwright server exit
+    // as a wrapper-level `close` so BrowserManager can clean up the
+    // session and its user-data-dir. Guard against re-entry from the
+    // normal close() path.
+    browser.once('close', () => {
+      if (this.running) {
+        this.logger.info(
+          `${this.constructor.name} closed unexpectedly, emitting close`,
+        );
+        this.socket?.destroy();
+        this.emit('close');
+        this.cleanListeners();
+        this.running = false;
+        this.browser = null;
+        this.browserWSEndpoint = null;
+      }
+    });
+
+    return browser;
   }
 }
 
